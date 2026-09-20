@@ -5,7 +5,9 @@
 - 「套餐名：价格：过敏原列表」逐行解析：三段格式、价格精确小数、空过敏原、
   注释空行、套餐名去空与重名整批拒绝（逐行给出问题）；
 - 子集动态规划：最低总价覆盖、同价按套餐名序列字典序取唯一、并列数，
-  对照暴力枚举；
+  对照暴力枚举；0 价冗余套餐（覆盖至少一个必须项但加入后不新增覆盖）
+  作为不同同价组合计入并列、其展示方案覆盖贡献为空且累计覆盖不变，
+  正价冗余永不进入最低价；
 - 精确有理数（0.1 + 0.2 == 0.3）；
 - 无法覆盖时列出缺口；覆盖贡献与累计覆盖；额外过敏原与无用套餐不参与组合；
 - 缺失 / 非法 ID / 需复核记录拒绝并说明；全程只读、不写库。
@@ -152,6 +154,105 @@ class DPTest(unittest.TestCase):
         self.assertEqual(r["optimal_count"], 2)
         self.assertEqual([s["name"] for s in r["selections"]], ["X", "Y"])
 
+    def test_zero_price_redundant_counts_as_tie(self):
+        # 加赠（0 元，仅覆盖麸质谷物）覆盖至少一个必须项；加入「基础」后
+        # 不新增覆盖，旧实现漏算该并列：(基础) 与 (基础,加赠) 同价 14.9
+        target = ["蛋类", "麸质谷物"]
+        pkgs = self._pkgs([
+            ("基础", "14.9", ["蛋类", "麸质谷物"]),
+            ("加赠", "0", ["麸质谷物"]),
+        ])
+        r = solve_panel(target, pkgs)
+        self.assertTrue(r["feasible"])
+        self.assertEqual(r["total_price"], 14.9)
+        self.assertEqual(r["optimal_count"], 2)
+        # 两个名称序列 ('基础',) 与 ('加赠','基础')，字典序取后者
+        self.assertEqual([s["name"] for s in r["selections"]], ["加赠", "基础"])
+        # 加赠先贡献麸质谷物，基础加入时麸质谷物已覆盖 → 只贡献蛋类
+        self.assertEqual(r["selections"][0]["contribution"], ["麸质谷物"])
+        self.assertEqual(r["selections"][0]["cumulative_covered"], ["麸质谷物"])
+        self.assertEqual(r["selections"][1]["contribution"], ["蛋类"])
+        self.assertEqual(r["selections"][1]["cumulative_covered"],
+                         ["蛋类", "麸质谷物"])
+        bc, bkey, bways = brute_force(target, pkgs)
+        self.assertEqual(Fraction("14.9"), bc)
+        self.assertEqual(bways, 2)
+        self.assertEqual(bkey, ("加赠", "基础"))
+
+    def test_zero_price_redundant_empty_contribution_and_cumulative(self):
+        # 0 元冗余套餐名排在「主套餐」之后时：两个组合并列，但不含它的
+        # 名称序列是前缀、字典序最小 → 展示方案不含赠品
+        target = ["乳", "蛋类"]
+        pkgs = self._pkgs([
+            ("主套餐", "10", ["乳", "蛋类"]),
+            ("赠品", "0", ["乳"]),
+        ])
+        r = solve_panel(target, pkgs)
+        self.assertEqual(r["total_price"], 10)
+        self.assertEqual(r["optimal_count"], 2)
+        self.assertEqual([s["name"] for s in r["selections"]], ["主套餐"])
+
+        # 0 元冗余套餐名夹在两个付费套餐之间（A付 < A赠 < B豆）：含它的
+        # 序列字典序更小而被展示；乳已被前面的 A付 覆盖 → 覆盖贡献为空、
+        # 累计覆盖保持不变
+        target3 = ["乳", "蛋类", "大豆"]
+        pkgs3 = self._pkgs([
+            ("A付", "5", ["乳", "蛋类"]),
+            ("A赠", "0", ["乳"]),
+            ("B豆", "5", ["大豆"]),
+        ])
+        r3 = solve_panel(target3, pkgs3)
+        self.assertEqual(r3["total_price"], 10)
+        self.assertEqual(r3["optimal_count"], 2)
+        self.assertEqual([s["name"] for s in r3["selections"]],
+                         ["A付", "A赠", "B豆"])
+        rows = {s["name"]: s for s in r3["selections"]}
+        self.assertEqual(rows["A付"]["contribution"], ["乳", "蛋类"])
+        self.assertEqual(rows["A赠"]["contribution"], [])
+        self.assertEqual(rows["A赠"]["cumulative_covered"], ["乳", "蛋类"])
+        self.assertEqual(rows["B豆"]["contribution"], ["大豆"])
+        self.assertEqual(rows["B豆"]["cumulative_covered"],
+                         ["乳", "大豆", "蛋类"])
+        bc, bkey, bways = brute_force(target3, pkgs3)
+        self.assertEqual(bways, 2)
+        self.assertEqual(bkey, ("A付", "A赠", "B豆"))
+
+    def test_positive_price_redundant_never_optimal(self):
+        # 正价冗余套餐（加购 5 元，仅覆盖已被基础包含的乳）不得进入最低价，
+        # 也不制造并列：最低价只有 (基础)
+        target = ["乳", "蛋类"]
+        pkgs = self._pkgs([
+            ("基础", "10", ["乳", "蛋类"]),
+            ("加购", "5", ["乳"]),
+        ])
+        r = solve_panel(target, pkgs)
+        self.assertTrue(r["feasible"])
+        self.assertEqual(r["total_price"], 10)
+        self.assertEqual(r["optimal_count"], 1)
+        self.assertEqual([s["name"] for s in r["selections"]], ["基础"])
+        bc, bkey, bways = brute_force(target, pkgs)
+        self.assertEqual(bc, Fraction("10"))
+        self.assertEqual(bways, 1)
+        self.assertEqual(bkey, ("基础",))
+
+    def test_zero_redundant_dedup_among_zero_covers(self):
+        # 三个 0 元套餐即可覆盖全部必须项：
+        # 5 个 0 元覆盖组合 {A}、{B,C}、{A,B}、{A,C}、{A,B,C}（后三个含
+        # 冗余 0 元选择），字典序最小为单元素的 ('A',)
+        target = ["乳", "蛋类"]
+        pkgs = self._pkgs([
+            ("A", "0", ["乳", "蛋类"]),
+            ("B", "0", ["乳"]),
+            ("C", "0", ["蛋类"]),
+        ])
+        r = solve_panel(target, pkgs)
+        self.assertEqual(r["total_price"], 0)
+        self.assertEqual(r["optimal_count"], 5)
+        self.assertEqual([s["name"] for s in r["selections"]], ["A"])
+        bc, bkey, bways = brute_force(target, pkgs)
+        self.assertEqual(bways, 5)
+        self.assertEqual(bkey, ("A",))
+
     def test_matches_brute_force(self):
         import random
         random.seed(7)
@@ -160,7 +261,7 @@ class DPTest(unittest.TestCase):
         for trial in range(60):
             spec = []
             for i in range(random.randint(1, 7)):
-                spec.append((f"P{i}", random.choice(["1", "2", "3", "0.5"]),
+                spec.append((f"P{i}", random.choice(["1", "2", "3", "0.5", "0"]),
                              random.sample(universe, random.randint(0, 4))))
             pkgs = self._pkgs(spec)
             r = solve_panel(target, pkgs)
@@ -176,6 +277,41 @@ class DPTest(unittest.TestCase):
                 self.assertEqual(Fraction(str(r["total_price"])), bc)
                 self.assertEqual(r["optimal_count"], bways)
                 self.assertEqual(tuple(s["name"] for s in r["selections"]), bkey)
+
+    def test_fuzz_zero_and_positive_redundant(self):
+        # 高强度对照：价格池含 0 / 正价 / 精确小数，套餐数更多，确保
+        # 0 元冗余计入并列、正价冗余不入最低价、字典序重建与暴力枚举一致
+        import random
+        random.seed(20260920)
+        target = ["A", "B", "C"]
+        universe = ["A", "B", "C", "X"]
+        prices = ["0", "0", "1", "2", "0.3", "0.1", "5"]
+        for trial in range(300):
+            spec = []
+            for i in range(random.randint(1, 9)):
+                spec.append((f"P{i}", random.choice(prices),
+                             random.sample(universe, random.randint(0, 3))))
+            pkgs = self._pkgs(spec)
+            r = solve_panel(target, pkgs)
+            bc, bkey, bways = brute_force(target, pkgs)
+            if bc is None:
+                self.assertFalse(r["feasible"])
+                continue
+            self.assertTrue(r["feasible"])
+            self.assertEqual(Fraction(str(r["total_price"])), bc)
+            self.assertEqual(r["optimal_count"], bways)
+            key = tuple(s["name"] for s in r["selections"])
+            self.assertEqual(key, bkey)
+            # 展示方案确实以最低总价覆盖，且空贡献套餐不改变累计覆盖
+            covered = set()
+            for s in r["selections"]:
+                before = set(covered)
+                covered |= set(s["contribution"])
+                self.assertEqual(set(s["cumulative_covered"]), covered)
+                self.assertTrue(set(s["contribution"]) <= set(target) - before)
+            self.assertTrue(set(target) <= covered)
+            self.assertEqual(sum((Fraction(str(s["price"]))
+                                  for s in r["selections"]), Fraction(0)), bc)
 
     def test_empty_target(self):
         r = solve_panel([], self._pkgs([("A", "1", ["乳"])]))
@@ -227,6 +363,26 @@ class PreviewFlowTest(unittest.TestCase):
         self.assertTrue(r["feasible"])
         self.assertEqual(r["total_price"], 24.9)
         self.assertEqual(r["optimal_count"], 1)
+
+    def test_zero_redundant_tie_in_preview(self):
+        # 全链路：0 元加赠覆盖必须项「麸质谷物」，加入 14.9 基础包后不新增
+        # 覆盖，仍作为第二个最低价组合计数并按字典序展示在最前
+        rid = make_review("配料表：小麦粉，鸡蛋", name="两必项")
+        r = build_panel_preview(
+            rid,
+            "基础包：14.9：麸质谷物，蛋类\n加赠包：0：麸质谷物")
+        self.assertTrue(r["feasible"])
+        self.assertEqual(r["required_allergens"], ["蛋类", "麸质谷物"])
+        self.assertEqual(r["total_price"], 14.9)
+        self.assertEqual(r["optimal_count"], 2)
+        self.assertEqual([s["name"] for s in r["selections"]],
+                         ["加赠包", "基础包"])
+        self.assertEqual(r["selections"][0]["contribution"], ["麸质谷物"])
+        self.assertEqual(r["selections"][1]["contribution"], ["蛋类"])
+        self.assertEqual(r["selections"][1]["cumulative_covered"],
+                         ["蛋类", "麸质谷物"])
+        # 两个套餐都覆盖至少一个必须项，不属于 unused
+        self.assertEqual(r["unused_packages"], [])
 
     def test_empty_packages_rejected(self):
         rid = make_review(TEXT_MILK)

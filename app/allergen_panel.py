@@ -20,9 +20,12 @@
 覆盖全部目标过敏原的**总价最低**套餐组合（每个套餐至多选一次；套餐覆盖
 的非目标过敏原不影响可行性，仅作展示）：
 
-- 不覆盖任何目标过敏原的套餐不参与组合，仅原样列回；转移时跳过「不带来
-  任何新覆盖」的选择（价格非负，冗余套餐不可能更优，0 元冗余也不计入并列）；
-- 总价并列时，按所选套餐名升序序列的**字典序**取唯一最小方案；
+- 不覆盖任何目标过敏原的套餐不参与组合，仅原样列回；转移时区分「不带来
+  任何新覆盖」的冗余选择：正价冗余一律跳过（价格非负，不可能更优，永不
+  进入最低价）；0 价冗余只要套餐本身覆盖至少一个必须项，即使加入后不新增
+  覆盖，也作为不同的同价组合计入并列（其名称序列字典序可能更小而被展示）；
+- 总价并列时，按所选套餐名升序序列的**字典序**取唯一最小方案（被展示的
+  方案中允许出现覆盖贡献为空的套餐，累计覆盖保持不变）；
 - 同时统计达到最低总价的不同套餐组合数，供页面并列提示；
 - 全部套餐的过敏原并集仍缺少某些目标过敏原时无解，逐条列出**覆盖缺口**；
 - 结果按套餐名序列展示每个套餐的**覆盖贡献**（本套餐新覆盖的目标过敏原）
@@ -186,8 +189,10 @@ def solve_panel(target: List[str], packages: List[dict]) -> dict:
     """子集动态规划求覆盖目标过敏原的最低总价套餐组合。
 
     target 为必须覆盖的过敏原（去重排序）；packages 为已解析套餐。价格经
-    Fraction 精确比较；同价按套餐名升序序列字典序取唯一方案，并统计并列
-    组合数。无法覆盖全部目标时返回 feasible=False 与覆盖缺口。
+    Fraction 精确比较：正向 0/1 背包统计各覆盖状态的最低总价与并列组合数
+    （正价冗余跳过、0 元冗余允许自转移计入并列），再以**后缀 DP + 按套餐名
+    升序贪心**重建字典序最小的唯一方案（不在状态里存代表键：局部最小键追加
+    未来套餐后未必仍最小）。无法覆盖全部目标时返回 feasible=False 与覆盖缺口。
     """
     allergens = sorted(set(target))
     index = {a: i for i, a in enumerate(allergens)}
@@ -208,26 +213,28 @@ def solve_panel(target: List[str], packages: List[dict]) -> dict:
     useful.sort(key=lambda p: p["name"])
 
     full = (1 << m) - 1
-    # 0/1 背包：dp[mask] = 恰好覆盖 mask 的最优
-    # (总价 Fraction, 套餐名升序元组, 并列组合数)；不可达为 None。
-    dp: List[Optional[Tuple[Fraction, tuple, int]]] = [None] * (1 << m)
-    dp[0] = (Fraction(0), (), 1)
+    # 0/1 背包：dp[mask] = 恰好覆盖 mask 的 (总价 Fraction, 并列组合数)，
+    # 不可达为 None。每个状态只存成本与并列数；字典序最小方案不用局部代表
+    # 键（局部最小键追加未来套餐后未必仍最小），稍后用后缀 DP 贪心重建。
+    dp: List[Optional[Tuple[Fraction, int]]] = [None] * (1 << m)
+    dp[0] = (Fraction(0), 1)
     for pkg in useful:
         snapshot = list(dp)  # 每个套餐至多选一次：只由「处理它之前」的状态转移
-        pmask, price, pname = pkg["mask"], pkg["price"], pkg["name"]
+        pmask, price = pkg["mask"], pkg["price"]
         for mask, state in enumerate(snapshot):
-            if state is None or (mask & pmask) == pmask:
-                continue  # 不可达，或该套餐不带来任何新覆盖
+            if state is None:
+                continue
+            redundant = (mask & pmask) == pmask  # 加入该套餐不带来任何新覆盖
+            if redundant and price > 0:
+                continue  # 正价冗余不可能更优，永不进入最低价
             nmask = mask | pmask
             cand_cost = state[0] + price
-            cand_key = tuple(sorted(state[1] + (pname,)))
             cur = dp[nmask]
             if cur is None or cand_cost < cur[0]:
-                dp[nmask] = (cand_cost, cand_key, state[2])
+                dp[nmask] = (cand_cost, state[1])
             elif cand_cost == cur[0]:
-                ways = cur[2] + state[2]
-                key = cand_key if cand_key < cur[1] else cur[1]
-                dp[nmask] = (cur[0], key, ways)
+                # 不同前驱子集与「不选本套餐」的方案互不相交，并列数直接相加
+                dp[nmask] = (cur[0], cur[1] + state[1])
 
     by_name = {p["name"]: p for p in useful}
     for p in unused:
@@ -250,7 +257,7 @@ def solve_panel(target: List[str], packages: List[dict]) -> dict:
 
     if m == 0:
         # 当前配方不含任何过敏原：空组合即以 0 元完成覆盖
-        best: Optional[Tuple[Fraction, tuple, int]] = (Fraction(0), (), 1)
+        best: Optional[Tuple[Fraction, int]] = (Fraction(0), 1)
     else:
         best = dp[full]
 
@@ -271,7 +278,48 @@ def solve_panel(target: List[str], packages: List[dict]) -> dict:
                          for n in sorted(by_name)],
         }
 
-    total, key, ways = best
+    total, ways = best
+    # 后缀 DP：suf[k][mask] = 仅用 useful[k:] 把已覆盖 mask 补到 full 的最低
+    # 追加成本（不可达为 None）。随后按套餐名升序贪心重建字典序最小方案：
+    # 已能以预算补全即停止（空续接是前缀，字典序最小）；否则取「加入后仍能
+    # 以最低总价补全」的最小名套餐——0 元冗余因不耗预算会被纳入（其覆盖贡献
+    # 为空、累计覆盖不变），正价冗余无法满足预算恒等式而被自动排除。
+    n = len(useful)
+    suf: List[List[Optional[Fraction]]] = [
+        [None] * (1 << m) for _ in range(n + 1)]
+    suf[n][full] = Fraction(0)
+    for k in range(n - 1, -1, -1):
+        pmask = useful[k]["mask"]
+        price = useful[k]["price"]
+        for mask in range(1 << m):
+            skip = suf[k + 1][mask]
+            tail = suf[k + 1][mask | pmask]
+            take = tail + price if tail is not None else None
+            if skip is None:
+                chosen = take
+            elif take is None:
+                chosen = skip
+            else:
+                chosen = skip if skip < take else take
+            suf[k][mask] = chosen
+
+    key: List[str] = []
+    covered = 0
+    spent = Fraction(0)
+    k = 0
+    while not (covered == full and spent == total):
+        for j in range(k, n):
+            pkg = useful[j]
+            tail = suf[j + 1][covered | pkg["mask"]]
+            if tail is not None and spent + pkg["price"] + tail == total:
+                key.append(pkg["name"])
+                covered |= pkg["mask"]
+                spent += pkg["price"]
+                k = j + 1
+                break
+        else:  # pragma: no cover - 可行性已由正向 DP 保证，理论上不可达
+            raise RuntimeError("最优方案重建失败")
+
     selections = []
     covered = 0
     for name in key:

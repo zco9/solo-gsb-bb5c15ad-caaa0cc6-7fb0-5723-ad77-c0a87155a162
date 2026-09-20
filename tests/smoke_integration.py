@@ -543,6 +543,24 @@ plan = build_panel_preview(panel_rid, tie_packages)
 assert plan["feasible"] and plan["total_price"] == 0.3 and plan["optimal_count"] == 2
 assert [s["name"] for s in plan["selections"]] == ["全包"]
 
+# 12c2. 0 元冗余套餐计入并列：0元加赠（0 元，只覆盖芝麻/坚果，后被全包
+# 覆盖）不新增覆盖也作为不同最低价组合；正价冗余套餐（加价购）不得进入最低价
+zero_tie = """\
+全包：24.9：麸质谷物，坚果，蛋类，芝麻
+0元加赠：0：芝麻，坚果
+加价购：5：坚果
+"""
+plan = build_panel_preview(panel_rid, zero_tie)
+assert plan["feasible"] and plan["total_price"] == 24.9
+assert plan["optimal_count"] == 2
+# ('全包',) 与 ('0元加赠','全包') 并列；'0' 码位最小，展示含 0元加赠者
+assert [s["name"] for s in plan["selections"]] == ["0元加赠", "全包"]
+rows = {s["name"]: s for s in plan["selections"]}
+assert rows["0元加赠"]["contribution"] == ["坚果", "芝麻"]
+assert rows["全包"]["contribution"] == ["蛋类", "麸质谷物"]
+assert rows["全包"]["cumulative_covered"] == ["坚果", "芝麻", "蛋类", "麸质谷物"]
+assert [p["name"] for p in plan["unused_packages"]] == []
+
 # 12d. 无法覆盖时列出缺口
 plan = build_panel_preview(panel_rid, "A：1：坚果\nB：2：麸质谷物")
 assert not plan["feasible"] and plan["uncovered"] == ["芝麻", "蛋类"]
