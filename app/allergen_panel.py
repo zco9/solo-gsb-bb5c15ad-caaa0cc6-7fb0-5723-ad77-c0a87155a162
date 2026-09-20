@@ -20,8 +20,9 @@
 覆盖全部目标过敏原的**总价最低**套餐组合（每个套餐至多选一次；套餐覆盖
 的非目标过敏原不影响可行性，仅作展示）：
 
-- 不覆盖任何目标过敏原的套餐不参与组合，仅原样列回；转移时跳过「不带来
-  任何新覆盖」的选择（价格非负，冗余套餐不可能更优，0 元冗余也不计入并列）；
+- 不覆盖任何目标过敏原的套餐不参与组合，仅原样列回；转移时若该套餐不带来
+  任何新覆盖，正价选择只会更贵（不可能进入最低价）故跳过，**零价选择**仍
+  视为不同的最低价组合计入并列（其覆盖贡献允许为空，不改变累计覆盖）；
 - 总价并列时，按所选套餐名升序序列的**字典序**取唯一最小方案；
 - 同时统计达到最低总价的不同套餐组合数，供页面并列提示；
 - 全部套餐的过敏原并集仍缺少某些目标过敏原时无解，逐条列出**覆盖缺口**；
@@ -186,8 +187,15 @@ def solve_panel(target: List[str], packages: List[dict]) -> dict:
     """子集动态规划求覆盖目标过敏原的最低总价套餐组合。
 
     target 为必须覆盖的过敏原（去重排序）；packages 为已解析套餐。价格经
-    Fraction 精确比较；同价按套餐名升序序列字典序取唯一方案，并统计并列
-    组合数。无法覆盖全部目标时返回 feasible=False 与覆盖缺口。
+    Fraction 精确比较，并统计达到最低总价的**不同组合数**：加入后不新增覆盖
+    的**正价**套餐只会更贵、不参与任何最低价组合；**零价**冗余套餐不改变
+    总价，仍作为不同组合计入并列（其覆盖贡献允许为空、累计覆盖不变）。
+
+    展示的唯一方案取全部最低价组合中「套餐名升序序列」**字典序最小**者。
+    DP 按名序逐个处理，转移中以「末尾补无穷大哨兵」比较（保证中间插入的
+    较小 0 元冗余名在追加后续套餐后确实使完整序列更小），最终再剥离展示
+    序列末尾连续的冗余 0 元套餐（序列已终结时更短者字典序更小）。无法覆盖
+    全部目标时返回 feasible=False 与覆盖缺口。
     """
     allergens = sorted(set(target))
     index = {a: i for i, a in enumerate(allergens)}
@@ -206,18 +214,37 @@ def solve_panel(target: List[str], packages: List[dict]) -> dict:
             unused.append(pkg)
     # 固定处理顺序：按套餐名排序，保证并列键与方案唯一、可复现
     useful.sort(key=lambda p: p["name"])
+    by_name = {p["name"]: p for p in useful}
+    for p in unused:
+        by_name[p["name"]] = p
 
     full = (1 << m) - 1
-    # 0/1 背包：dp[mask] = 恰好覆盖 mask 的最优
+    # 0/1 背包：dp[mask] = 恰好覆盖 mask 的最优状态
     # (总价 Fraction, 套餐名升序元组, 并列组合数)；不可达为 None。
+    # 转移进行中（后面还可能追加名序更大的套餐）按「末尾补一个无穷大元素」
+    # 比较名序：这样名序较小的 0 元冗余套餐会被保留（追加更大的后续套餐后
+    # 它会使完整序列字典序更小）；全部处理完再对最终状态剥离末尾的冗余 0 元
+    # 套餐（最终序列以更短者为字典序更小）。
+    def better_key(cand: tuple, cur: tuple) -> bool:
+        """「末尾补无穷大哨兵」后的字典序：逐位比较，首个不同位小者更小；
+        一位恰为另一位前缀时，把短方的下一位（哨兵）视为无穷大，因此
+        更长（还有真实套餐名）的一方在此处更小。
+        """
+        for a, b in zip(cand, cur):
+            if a != b:
+                return a < b
+        return len(cand) > len(cur)  # 公共前缀：较长（下一项是真实名）的更小
+
     dp: List[Optional[Tuple[Fraction, tuple, int]]] = [None] * (1 << m)
     dp[0] = (Fraction(0), (), 1)
     for pkg in useful:
         snapshot = list(dp)  # 每个套餐至多选一次：只由「处理它之前」的状态转移
         pmask, price, pname = pkg["mask"], pkg["price"], pkg["name"]
         for mask, state in enumerate(snapshot):
-            if state is None or (mask & pmask) == pmask:
-                continue  # 不可达，或该套餐不带来任何新覆盖
+            if state is None:
+                continue
+            if (mask & pmask) == pmask and price > 0:
+                continue  # 正价选择不新增覆盖只会更贵，不可能进入最低价
             nmask = mask | pmask
             cand_cost = state[0] + price
             cand_key = tuple(sorted(state[1] + (pname,)))
@@ -226,12 +253,27 @@ def solve_panel(target: List[str], packages: List[dict]) -> dict:
                 dp[nmask] = (cand_cost, cand_key, state[2])
             elif cand_cost == cur[0]:
                 ways = cur[2] + state[2]
-                key = cand_key if cand_key < cur[1] else cur[1]
+                key = cand_key if better_key(cand_key, cur[1]) else cur[1]
                 dp[nmask] = (cur[0], key, ways)
 
-    by_name = {p["name"]: p for p in useful}
-    for p in unused:
-        by_name[p["name"]] = p
+    def final_key(key: tuple) -> tuple:
+        """剥离最终序列末尾连续的「0 元且不新增覆盖」套餐。
+
+        它们在处理过程中按「末尾补无穷大」比较时被保留，但最终没有后续
+        套餐追加时，去掉末尾冗余后更短的序列字典序更小；中间的空贡献 0 元
+        套餐保留（它们使整个名序序列字典序更小）。
+        """
+        stripped = list(key)
+        while stripped:
+            name = stripped[-1]
+            pkg = by_name[name]
+            before = 0
+            for nm in stripped[:-1]:  # 并集不能做差（重复覆盖位会被误删）
+                before |= by_name[nm]["mask"]
+            if pkg["price"] != 0 or pkg["mask"] & ~before:
+                break
+            stripped.pop()
+        return tuple(stripped)
 
     def describe(pkg: dict, covered_before: int) -> dict:
         contribution = sorted(
@@ -272,6 +314,7 @@ def solve_panel(target: List[str], packages: List[dict]) -> dict:
         }
 
     total, key, ways = best
+    key = final_key(key)
     selections = []
     covered = 0
     for name in key:

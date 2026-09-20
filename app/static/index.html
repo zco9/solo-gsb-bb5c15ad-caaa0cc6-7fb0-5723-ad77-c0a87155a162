@@ -1720,7 +1720,9 @@ function renderPanelResult(r) {
   }
 
   const tie = r.optimal_count > 1
-    ? `<p class="hint">共有 ${r.optimal_count} 个总价相同的并列最优套餐组合，已按套餐名序列字典序展示唯一确定者。</p>`
+    ? `<p class="hint">共有 ${r.optimal_count} 个总价相同的并列最优套餐组合
+      （只要覆盖至少一个必须项，0 元套餐即使不新增覆盖也作为不同组合计入；正价冗余组合不会进入最低价），
+      已在全部最低价组合中按套餐名序列字典序展示唯一最小方案（其中 0 元冗余套餐的覆盖贡献可为空，累计覆盖不变）。</p>`
     : '';
   const selRows = r.selections.map((s, i) => {
     const contrib = s.contribution.length
